@@ -577,3 +577,208 @@ describe('Token integration with createStellarBillClient', () => {
     expect(sdk1.getToken()).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// safeParseErrorBody – accepted-input branch (client.ts:116)
+//
+// Line 116: `return parsed as ApiErrorBody;`
+// Guard:    `parsed && typeof parsed === 'object' && !Array.isArray(parsed)`
+//
+// These tests exercise the branch both directly (unit) and end-to-end through
+// the SDK pipeline so the SDK contract is verifiable and deterministic.
+// ---------------------------------------------------------------------------
+
+describe('safeParseErrorBody – accepted-input branch (line 116)', () => {
+  // -- Direct unit tests for the accepted-input branch ---------------------
+
+  it('returns the full ApiErrorBody object when all three fields are present', async () => {
+    const body = { error: 'Bad Request', message: 'Invalid cursor', code: 'invalid_cursor' };
+    const r = new Response(JSON.stringify(body), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    });
+    const result = await safeParseErrorBody(r);
+    // Branch accepted the input → result must equal the original object shape.
+    expect(result).toEqual(body);
+    expect(result?.error).toBe('Bad Request');
+    expect(result?.message).toBe('Invalid cursor');
+    expect(result?.code).toBe('invalid_cursor');
+  });
+
+  it('returns the object when only the error field is present (partial ApiErrorBody)', async () => {
+    const body = { error: 'Unauthorized' };
+    const r = new Response(JSON.stringify(body), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    });
+    const result = await safeParseErrorBody(r);
+    expect(result).toEqual({ error: 'Unauthorized' });
+    expect(result?.code).toBeUndefined();
+    expect(result?.message).toBeUndefined();
+  });
+
+  it('returns the object when only the message field is present', async () => {
+    const body = { message: 'Resource not found' };
+    const r = new Response(JSON.stringify(body), {
+      status: 404,
+      headers: { 'content-type': 'application/json' },
+    });
+    const result = await safeParseErrorBody(r);
+    expect(result).toEqual({ message: 'Resource not found' });
+  });
+
+  it('preserves extra unknown fields that are not part of ApiErrorBody', async () => {
+    // The `as ApiErrorBody` cast does not strip extra properties — they must
+    // remain observable so callers who inspect the raw object are not surprised.
+    const body = { error: 'Gone', message: 'deleted', code: 'soft_deleted', detail: 'removed at t0' };
+    const r = new Response(JSON.stringify(body), {
+      status: 410,
+      headers: { 'content-type': 'application/json' },
+    });
+    const result = await safeParseErrorBody(r);
+    expect(result).toEqual(body);
+    expect((result as Record<string, unknown>)['detail']).toBe('removed at t0');
+  });
+
+  it('handles a deeply nested error object (accepted as-is, no recursion guard)', async () => {
+    const body = { error: 'Validation failed', nested: { inner: true } };
+    const r = new Response(JSON.stringify(body), {
+      status: 422,
+      headers: { 'content-type': 'application/json' },
+    });
+    const result = await safeParseErrorBody(r);
+    expect(result?.error).toBe('Validation failed');
+    expect((result as Record<string, unknown>)['nested']).toEqual({ inner: true });
+  });
+
+  it('accepts an empty object {} and returns it (not null, not array, is object)', async () => {
+    const r = new Response('{}', {
+      status: 500,
+      headers: { 'content-type': 'application/json' },
+    });
+    const result = await safeParseErrorBody(r);
+    expect(result).toEqual({});
+    expect(result).not.toBeNull();
+    expect(result).not.toBeUndefined();
+  });
+
+  // -- End-to-end pipeline tests (accepted-input flows through full SDK) ---
+
+  it('propagates the parsed error body in the SDK result envelope (non-throwOnError)', async () => {
+    // Exercises the full path: fetch → openapi-fetch → wrap() → SdkResult
+    // with a valid JSON object response body that hits line 116.
+    const errorBody = { error: 'Not Found', message: 'subscription gone', code: 'subscription_not_found' };
+    const { fetch } = mockFetchOnce(errorBody, { status: 404 });
+    const sdk = createStellarBillClient({ baseUrl: 'https://api.example.com', fetch });
+    const r = await sdk.getSubscription('sub-xyz');
+    expect(r.status).toBe(404);
+    // The error field must be the parsed object (not undefined, not a string).
+    expect(r.error).toEqual(errorBody);
+    expect(r.error?.code).toBe('subscription_not_found');
+    expect(r.error?.message).toBe('subscription gone');
+    expect(r.error?.error).toBe('Not Found');
+    expect(r.data).toBeUndefined();
+  });
+
+  it('propagates parsed error body on 400 from listPlans', async () => {
+    const errorBody = { error: 'Bad Request', message: 'limit must be > 0', code: 'invalid_limit' };
+    const { fetch } = mockFetchOnce(errorBody, { status: 400 });
+    const sdk = createStellarBillClient({ baseUrl: 'https://api.example.com', fetch });
+    const r = await sdk.listPlans({ limit: -1 });
+    expect(r.status).toBe(400);
+    expect(r.error?.code).toBe('invalid_limit');
+    expect(r.error?.message).toBe('limit must be > 0');
+    expect(r.data).toBeUndefined();
+  });
+
+  it('propagates parsed error body on 401 from inspectIdempotencyKey', async () => {
+    const errorBody = { error: 'Unauthorized', message: 'token missing', code: 'auth_required' };
+    const { fetch } = mockFetchOnce(errorBody, { status: 401 });
+    const sdk = createStellarBillClient({ baseUrl: 'https://api.example.com', fetch });
+    const r = await sdk.inspectIdempotencyKey('idem-key-abc');
+    expect(r.status).toBe(401);
+    expect(r.error).toEqual(errorBody);
+    expect(r.data).toBeUndefined();
+  });
+
+  it('parsed error body lands in StellarBillError.body when throwOnError: true', async () => {
+    // This verifies the accepted-input (line 116) object reaches the thrown
+    // error's .body property intact through the full SDK error path.
+    const errorBody = { error: 'Forbidden', message: 'wrong owner', code: 'ownership_violation' };
+    const { fetch } = mockFetchOnce(errorBody, { status: 403 });
+    const sdk = createStellarBillClient({
+      baseUrl: 'https://api.example.com',
+      throwOnError: true,
+      fetch,
+    });
+    let caught: unknown;
+    try {
+      await sdk.getSubscription('sub-forbidden');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(StellarBillError);
+    const e = caught as StellarBillError;
+    expect(e.status).toBe(403);
+    // The body must be the fully parsed object that came through line 116.
+    expect(e.body).toEqual(errorBody);
+    expect(e.body?.code).toBe('ownership_violation');
+    expect(e.body?.message).toBe('wrong owner');
+    expect(e.body?.error).toBe('Forbidden');
+    expect(e.requestMethod).toBe('GET');
+    expect(e.requestUrl).toContain('/api/subscriptions/');
+  });
+
+  it('assertOk throws with the accepted-input error body available on the error', async () => {
+    const errorBody = { error: 'Gone', message: 'soft deleted', code: 'soft_deleted' };
+    const { fetch } = mockFetchOnce(errorBody, { status: 410 });
+    const sdk = createStellarBillClient({ baseUrl: 'https://api.example.com', fetch });
+    const r = await sdk.getSubscription('deleted-id');
+    // Confirm the SDK result carries the parsed body before assertOk.
+    expect(r.error).toEqual(errorBody);
+    // assertOk must re-throw a StellarBillError whose .body matches.
+    let caught: unknown;
+    try {
+      await assertOk(r);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(StellarBillError);
+    const e = caught as StellarBillError;
+    expect(e.status).toBe(410);
+    expect(e.body).toEqual(errorBody);
+    expect(e.body?.code).toBe('soft_deleted');
+  });
+
+  it('request metadata (method, url) is preserved alongside the parsed error body', async () => {
+    // End-to-end: verify the full SdkResult envelope fields are consistent
+    // when line 116 branch is taken.
+    const errorBody = { error: 'Internal Server Error', message: 'unexpected', code: 'server_error' };
+    const { fetch } = mockFetchOnce(errorBody, { status: 500 });
+    const sdk = createStellarBillClient({
+      baseUrl: 'https://api.example.com',
+      token: 'valid-token',
+      fetch,
+    });
+    const r = await sdk.listSubscriptions();
+    expect(r.status).toBe(500);
+    expect(r.requestMethod).toBe('GET');
+    expect(r.requestUrl).toContain('/api/subscriptions');
+    expect(r.response).toBeInstanceOf(Response);
+    expect(r.error).toEqual(errorBody);
+    expect(r.data).toBeUndefined();
+  });
+
+  it('content-type with charset still triggers the accepted-input branch', async () => {
+    // Ensures `contentType.includes('application/json')` matches
+    // 'application/json; charset=utf-8' so the branch is reachable.
+    const body = { error: 'Conflict', message: 'duplicate key', code: 'duplicate' };
+    const r = new Response(JSON.stringify(body), {
+      status: 409,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
+    const result = await safeParseErrorBody(r);
+    expect(result).toEqual(body);
+    expect(result?.code).toBe('duplicate');
+  });
+});
