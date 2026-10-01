@@ -33,7 +33,11 @@ const (
 var (
 	OutboxPublisherLag            *prometheus.GaugeVec
 	OutboxBacklogDepth            *prometheus.GaugeVec
+	OutboxKafkaProduceLatency     *prometheus.HistogramVec
+	OutboxKafkaErrorsTotal        *prometheus.CounterVec
 	ChaosOutboxCancellationsTotal prometheus.Counter
+	OutboxPublisherLimit          prometheus.Gauge
+	OutboxPublisherInflight       prometheus.Gauge
 )
 
 func init() {
@@ -55,11 +59,42 @@ func init() {
 	)
 	_ = prometheus.Register(OutboxBacklogDepth)
 
+	OutboxKafkaProduceLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "outbox_kafka_produce_latency_seconds",
+			Help:    "Time spent producing messages to Kafka by topic",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"topic"},
+	)
+	_ = prometheus.Register(OutboxKafkaProduceLatency)
+
+	OutboxKafkaErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "outbox_kafka_errors_total",
+			Help: "Total Kafka publish errors by topic and reason",
+		},
+		[]string{"topic", "reason"},
+	)
+	_ = prometheus.Register(OutboxKafkaErrorsTotal)
+
 	ChaosOutboxCancellationsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "chaos_outbox_cancellations_total",
 		Help: "Total number of outbox publish cancellations injected by the chaos hook (staging only)",
 	})
 	_ = prometheus.Register(ChaosOutboxCancellationsTotal)
+
+	OutboxPublisherLimit = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "outbox_publisher_concurrency_limit",
+		Help: "Current adaptive concurrency limit of the outbox publisher",
+	})
+	_ = prometheus.Register(OutboxPublisherLimit)
+
+	OutboxPublisherInflight = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "outbox_publisher_inflight",
+		Help: "Number of outbox publish operations currently in flight",
+	})
+	_ = prometheus.Register(OutboxPublisherInflight)
 }
 
 // CapTenantLabel normalizes and truncates a tenant id for Prometheus labels.

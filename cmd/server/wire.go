@@ -18,6 +18,7 @@ import (
 	"net/http"
 
 	"github.com/google/wire"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // AppProviders is the complete set of constructor functions that wire uses to
@@ -28,6 +29,8 @@ import (
 var AppProviders = wire.NewSet(
 	ProvideConfig,
 	ProvideRouter,
+	ProvideDBPool,
+	ProvideReplicaPool,
 	ProvideHTTPServer,
 )
 
@@ -36,9 +39,10 @@ var AppProviders = wire.NewSet(
 //
 // The function signature is the public contract:
 //   - no inputs – all values come from the provider chain.
-//   - returns (*http.Server, error) so callers can detect config failures
-//     without a panic.
-func InitializeServer() (*http.Server, error) {
+//   - returns (primary, replica *pgxpool.Pool, *http.Server, error). Both pools
+//     are returned so main() can drain them during graceful shutdown. The
+//     replica pool is nil when no replica is configured.
+func InitializeServer() (*pgxpool.Pool, *pgxpool.Pool, *http.Server, error) {
 	wire.Build(AppProviders)
-	return nil, nil
+	return nil, nil, nil, nil
 }
