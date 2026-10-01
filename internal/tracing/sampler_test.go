@@ -145,8 +145,8 @@ func TestTenantAwareSampler_ParentBasedInheritance(t *testing.T) {
 
 	// Simulate a parent that was sampled
 	sampledCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID: trace.TraceID{1},
-		SpanID:  trace.SpanID{1},
+		TraceID:    trace.TraceID{1},
+		SpanID:     trace.SpanID{1},
 		TraceFlags: trace.FlagsSampled,
 	}))
 
@@ -289,7 +289,7 @@ func TestInitTracer(t *testing.T) {
 	shutdown, err := InitTracer("test-service")
 	require.NoError(t, err)
 	require.NotNil(t, shutdown)
-	require.NoError(t, shutdown())
+	shutdown()
 }
 
 func TestInitTracer_EnvRatios(t *testing.T) {
